@@ -20,10 +20,12 @@
 package org.elasticsearch.cluster.allocation;
 
 import com.carrotsearch.hppc.ObjectIntOpenHashMap;
+import com.carrotsearch.hppc.cursors.ObjectIntCursor;
 import com.google.common.base.Predicate;
 import org.apache.lucene.util.LuceneTestCase.Slow;
 import org.elasticsearch.action.admin.cluster.health.ClusterHealthResponse;
 import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.routing.IndexRoutingTable;
 import org.elasticsearch.cluster.routing.IndexShardRoutingTable;
 import org.elasticsearch.cluster.routing.ShardRouting;
@@ -32,11 +34,15 @@ import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.settings.ImmutableSettings;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.node.Node;
 import org.elasticsearch.test.ElasticsearchIntegrationTest;
 import org.elasticsearch.test.ElasticsearchIntegrationTest.ClusterScope;
 import org.junit.Test;
 
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.elasticsearch.common.settings.ImmutableSettings.settingsBuilder;
@@ -247,4 +253,116 @@ public class AwarenessAllocationTests extends ElasticsearchIntegrationTest {
         assertThat(counts.get(B_1), equalTo(2));
         assertThat(counts.get(noZoneNode), equalTo(2));
     }
+
+    @Test
+    @Slow
+    public void testRackAwarenessBalance() throws Exception {
+        Settings commonSettings = ImmutableSettings.settingsBuilder()
+                .put("cluster.routing.allocation.awareness.attributes", "rack_id")
+                .build();
+
+        logger.info("--> starting 20 nodes on different racks");
+        final List<String> nodes = internalCluster().startNodesAsync(
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "k02").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "k04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "k04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "k04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "k04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "k04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l02").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l02").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l02").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l03").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l03").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l04").build(),
+                ImmutableSettings.settingsBuilder().put(commonSettings).put("node.rack_id", "l05").build()
+        ).get();
+        Map<String, String> names = new HashMap<String, String>(20) {{
+            put(nodes.get(0), "k02_1");
+            put(nodes.get(1), "k04_1");
+            put(nodes.get(2), "k04_2");
+            put(nodes.get(3), "k04_3");
+            put(nodes.get(4), "k04_4");
+            put(nodes.get(5), "k04_5");
+            put(nodes.get(6), "l02_1");
+            put(nodes.get(7), "l02_2");
+            put(nodes.get(8), "l02_3");
+            put(nodes.get(9), "l03_1");
+            put(nodes.get(10), "l03_2");
+            put(nodes.get(11), "l04_1");
+            put(nodes.get(12), "l04_2");
+            put(nodes.get(13), "l04_3");
+            put(nodes.get(14), "l04_4");
+            put(nodes.get(15), "l04_5");
+            put(nodes.get(16), "l04_6");
+            put(nodes.get(17), "l04_7");
+            put(nodes.get(18), "l04_8");
+            put(nodes.get(19), "l05_1");
+        }};
+
+        logger.info("--> making index with 40 shards (5 primary, 7 replicas)");
+        client().admin().indices().prepareCreate("test").setSettings(
+                settingsBuilder().put("index.number_of_shards", 5).put("index.number_of_replicas", 7))
+                .execute().actionGet();
+        ClusterHealthResponse health = client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID)
+                .setWaitForGreenStatus().setWaitForNodes("20").setTimeout("30s").setWaitForRelocatingShards(0).execute().actionGet();
+        assertThat(health.isTimedOut(), equalTo(false));
+        ClusterState clusterState = client().admin().cluster().prepareState().execute().actionGet().getState();
+
+        ObjectIntOpenHashMap<String> perNodeCounts = new ObjectIntOpenHashMap<>();
+        ObjectIntOpenHashMap<String> perRackCounts = new ObjectIntOpenHashMap<>();
+
+        System.out.println("*****************");
+        System.out.println("Shard allocation:");
+
+        for (IndexRoutingTable indexRoutingTable : clusterState.routingTable()) {
+            for (IndexShardRoutingTable indexShardRoutingTable : indexRoutingTable) {
+                for (ShardRouting shardRouting : indexShardRoutingTable) {
+                    if (!shardRouting.assignedToNode()) {
+                        continue;
+                    }
+                    DiscoveryNode node = clusterState.nodes().get(shardRouting.currentNodeId());
+                    String name = names.get(node.name());
+                    perNodeCounts.addTo(name, 1);
+                    perRackCounts.addTo(node.getAttributes().get("rack_id"), 1);
+
+                    System.out.println("shard " + shardRouting.getId() + " on " + name);
+                }
+            }
+        }
+
+        System.out.println("===============");
+        System.out.println("Shards per rack:");
+
+        int shardSum1 = 0;
+        for (ObjectIntCursor<String> cursor : perRackCounts) {
+            String rackId = cursor.key;
+            int numShardsOnRack = perRackCounts.get(rackId);
+            shardSum1 += numShardsOnRack;
+            System.out.println(rackId + " " + numShardsOnRack);
+        }
+
+        System.out.println("---------------");
+        System.out.println("Shards per node:");
+
+        int shardSum2 = 0;
+        for (ObjectIntCursor<String> cursor : perNodeCounts) {
+            String nodeName = cursor.key;
+            int numShardsOnNode = perNodeCounts.get(nodeName);
+            shardSum2 += numShardsOnNode;
+            System.out.println(nodeName + " " + numShardsOnNode);
+            assertThat("allocation not balanced looking at number of shards on " + nodeName, numShardsOnNode, equalTo(2));
+        }
+
+        assertThat("not all shards assigned", shardSum1, equalTo(40));
+        assertThat("not all shards assigned", shardSum2, equalTo(40));
+    }
+
 }
