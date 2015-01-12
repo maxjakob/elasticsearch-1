@@ -308,8 +308,10 @@ public class AwarenessAllocationTests extends ElasticsearchIntegrationTest {
         }};
 
         logger.info("--> making index with 40 shards (5 primary, 7 replicas)");
-        client().admin().indices().prepareCreate("test").setSettings(
-                settingsBuilder().put("index.number_of_shards", 5).put("index.number_of_replicas", 7))
+        client().admin().indices().prepareCreate("test").setSettings(settingsBuilder()
+                .put("index.number_of_shards", 5)
+                .put("index.number_of_replicas", 7)
+                .put("index.routing.allocation.total_shards_per_node", 2))
                 .execute().actionGet();
         ClusterHealthResponse health = client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID)
                 .setWaitForGreenStatus().setWaitForNodes("20").setTimeout("30s").setWaitForRelocatingShards(0).execute().actionGet();
